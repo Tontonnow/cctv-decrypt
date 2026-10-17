@@ -83,7 +83,7 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang pkg-config libavformat-dev libavcodec-dev libavutil-dev jq
+          sudo apt-get install -y clang pkg-config libavformat-dev libavcodec-dev libavutil-dev jq patchelf
 
       - name: Install macOS dependencies
         if: matrix.os == 'macos'
@@ -153,42 +153,77 @@ jobs:
         if: matrix.os != 'windows'
         run: |
           bundle_dir="bundle-${{ matrix.target }}"
-          mkdir -p "$bundle_dir/lib" "$bundle_dir/tools"
+          mkdir -p "$bundle_dir"
           cp license.py "$bundle_dir/"
           cp udrm_remux "$bundle_dir/"
 
           if [ "${{ matrix.os }}" = "linux" ]; then
-            ldd udrm_remux | awk '/=> \// && ($1 ~ /(libavformat|libavcodec|libavutil|libswresample|libswscale|libpostproc)/) {print $3}' | sort -u | xargs -r -I{} cp -Lv "{}" "$bundle_dir/lib/"
+            ldd udrm_remux | awk '/=> \// && ($1 ~ /(libavformat|libavcodec|libavutil|libswresample|libswscale|libpostproc)/) {print $3}' | sort -u | xargs -r -I{} cp -Lv "{}" "$bundle_dir/"
+            patchelf --set-rpath '$ORIGIN' "$bundle_dir/udrm_remux"
           else
-            otool -L udrm_remux | awk '/(libavformat|libavcodec|libavutil|libswresample|libswscale|libpostproc).*dylib/ {print $1}' | sort -u | xargs -I{} cp -Lv "{}" "$bundle_dir/lib/"
+            otool -L udrm_remux | awk '/(libavformat|libavcodec|libavutil|libswresample|libswscale|libpostproc).*dylib/ {print $1}' | sort -u | xargs -I{} cp -Lv "{}" "$bundle_dir/"
+
+            for dylib in "$bundle_dir"/libav*.dylib "$bundle_dir"/libsw*.dylib "$bundle_dir"/libpostproc*.dylib; do
+              [ -e "$dylib" ] || continue
+              install_name_tool -id "@rpath/$(basename "$dylib")" "$dylib" || true
+            done
+
+            for target in "$bundle_dir/udrm_remux" "$bundle_dir"/libav*.dylib "$bundle_dir"/libsw*.dylib "$bundle_dir"/libpostproc*.dylib; do
+              [ -e "$target" ] || continue
+              otool -L "$target" | awk '/(libavformat|libavcodec|libavutil|libswresample|libswscale|libpostproc).*dylib/ {print $1}' | while read -r dep; do
+                [ -n "$dep" ] || continue
+                if [ "$target" = "$bundle_dir/udrm_remux" ]; then
+                  new_path="@executable_path/$(basename "$dep")"
+                else
+                  new_path="@loader_path/$(basename "$dep")"
+                fi
+                install_name_tool -change "$dep" "$new_path" "$target" || true
+              done
+            done
           fi
 
           curl -fsSL "${{ steps.resolve_asset_unix.outputs.asset_url }}" -o nm3u8dl.${{ matrix.archive_ext }}
-          mkdir -p "$bundle_dir/tools/N_m3u8DL-RE"
-          tar -xzf nm3u8dl.${{ matrix.archive_ext }} -C "$bundle_dir/tools/N_m3u8DL-RE"
+          tmp_extract="$(mktemp -d)"
+          tar -xzf nm3u8dl.${{ matrix.archive_ext }} -C "$tmp_extract"
+          entry_count="$(find "$tmp_extract" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
+          if [ "$entry_count" = "1" ] && [ -d "$(find "$tmp_extract" -mindepth 1 -maxdepth 1 | head -n 1)" ]; then
+            cp -a "$(find "$tmp_extract" -mindepth 1 -maxdepth 1 | head -n 1)"/. "$bundle_dir"/
+          else
+            cp -a "$tmp_extract"/. "$bundle_dir"/
+          fi
+          rm -rf "$tmp_extract"
 
-          tar -czf "cctv-decrypt-${{ matrix.target }}.tar.gz" "$bundle_dir"
+          tar -czf "cctv-decrypt-${{ matrix.target }}.tar.gz" -C "$bundle_dir" .
 
       - name: Package bundle (Windows)
         if: matrix.os == 'windows'
         shell: msys2 {0}
         run: |
           bundle_dir="bundle-${{ matrix.target }}"
-          mkdir -p "$bundle_dir/lib" "$bundle_dir/tools"
+          mkdir -p "$bundle_dir"
           cp license.py "$bundle_dir/"
           cp udrm_remux.exe "$bundle_dir/"
 
-          cp -Lv "${{ matrix.tool_root }}/bin"/libavcodec*.dll "$bundle_dir/lib/" || true
-          cp -Lv "${{ matrix.tool_root }}/bin"/libavformat*.dll "$bundle_dir/lib/" || true
-          cp -Lv "${{ matrix.tool_root }}/bin"/libavutil*.dll "$bundle_dir/lib/" || true
-          cp -Lv "${{ matrix.tool_root }}/bin"/libswresample*.dll "$bundle_dir/lib/" || true
-          cp -Lv "${{ matrix.tool_root }}/bin"/libswscale*.dll "$bundle_dir/lib/" || true
+          cp -Lv "${{ matrix.tool_root }}/bin"/libavcodec*.dll "$bundle_dir/" || true
+          cp -Lv "${{ matrix.tool_root }}/bin"/libavformat*.dll "$bundle_dir/" || true
+          cp -Lv "${{ matrix.tool_root }}/bin"/libavutil*.dll "$bundle_dir/" || true
+          cp -Lv "${{ matrix.tool_root }}/bin"/libswresample*.dll "$bundle_dir/" || true
+          cp -Lv "${{ matrix.tool_root }}/bin"/libswscale*.dll "$bundle_dir/" || true
+          cp -Lv "${{ matrix.tool_root }}/bin"/libpostproc*.dll "$bundle_dir/" || true
 
           curl -fsSL "${{ steps.resolve_asset_win.outputs.asset_url }}" -o nm3u8dl.zip
-          mkdir -p "$bundle_dir/tools/N_m3u8DL-RE"
-          unzip -q nm3u8dl.zip -d "$bundle_dir/tools/N_m3u8DL-RE"
+          tmp_extract="$(mktemp -d)"
+          unzip -q nm3u8dl.zip -d "$tmp_extract"
+          entry_count="$(find "$tmp_extract" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
+          if [ "$entry_count" = "1" ] && [ -d "$(find "$tmp_extract" -mindepth 1 -maxdepth 1 | head -n 1)" ]; then
+            cp -a "$(find "$tmp_extract" -mindepth 1 -maxdepth 1 | head -n 1)"/. "$bundle_dir"/
+          else
+            cp -a "$tmp_extract"/. "$bundle_dir"/
+          fi
+          rm -rf "$tmp_extract"
 
-          zip -r "cctv-decrypt-${{ matrix.target }}.zip" "$bundle_dir"
+          cd "$bundle_dir"
+          zip -r "../cctv-decrypt-${{ matrix.target }}.zip" .
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
