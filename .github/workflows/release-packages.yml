@@ -41,6 +41,11 @@ jobs:
             os: linux
             archive_ext: tar.gz
             nm3u8_pattern: "_linux-arm64_.*\\.tar\\.gz$"
+          - target: osx-x64
+            runner: macos-13
+            os: macos
+            archive_ext: tar.gz
+            nm3u8_pattern: "_osx-x64_.*\\.tar\\.gz$"
           - target: osx-arm64
             runner: macos-14
             os: macos
@@ -109,17 +114,22 @@ jobs:
         shell: msys2 {0}
         run: make clean && make
 
-      - name: Resolve N_m3u8DL-RE asset URL (Unix)
+      - name: Resolve N_m3u8DL-RE asset URL (Linux/macOS)
         if: matrix.os != 'windows'
-        id: resolve_asset
+        id: resolve_asset_unix
         run: |
           if [ "${N_M3U8DL_RE_TAG}" = "latest" ]; then
-            url="https://api.github.com/repos/${N_M3U8DL_RE_REPO}/releases/latest"
+            release_url="https://api.github.com/repos/${N_M3U8DL_RE_REPO}/releases/latest"
           else
-            url="https://api.github.com/repos/${N_M3U8DL_RE_REPO}/releases/tags/${N_M3U8DL_RE_TAG}"
+            release_url="https://api.github.com/repos/${N_M3U8DL_RE_REPO}/releases/tags/${N_M3U8DL_RE_TAG}"
           fi
-          asset=$(curl -fsSL "$url" | jq -r --arg p "${{ matrix.nm3u8_pattern }}" '.assets[]|select(.name|test($p))|.browser_download_url'|head -n1)
-          echo "asset_url=$asset" >> "$GITHUB_OUTPUT"
+          release_json=$(curl -fsSL "$release_url")
+          asset_url=$(echo "$release_json" | jq -r --arg pattern "${{ matrix.nm3u8_pattern }}" '.assets[] | select(.name | test($pattern)) | .browser_download_url' | head -n 1)
+          if [ -z "$asset_url" ] || [ "$asset_url" = "null" ]; then
+            echo "No matching N_m3u8DL-RE asset found for pattern: ${{ matrix.nm3u8_pattern }}"
+            exit 1
+          fi
+          echo "asset_url=$asset_url" >> "$GITHUB_OUTPUT"
 
       - name: Resolve N_m3u8DL-RE asset URL (Windows)
         if: matrix.os == 'windows'
@@ -127,51 +137,60 @@ jobs:
         shell: msys2 {0}
         run: |
           if [ "${N_M3U8DL_RE_TAG}" = "latest" ]; then
-            url="https://api.github.com/repos/${N_M3U8DL_RE_REPO}/releases/latest"
+            release_url="https://api.github.com/repos/${N_M3U8DL_RE_REPO}/releases/latest"
           else
-            url="https://api.github.com/repos/${N_M3U8DL_RE_REPO}/releases/tags/${N_M3U8DL_RE_TAG}"
+            release_url="https://api.github.com/repos/${N_M3U8DL_RE_REPO}/releases/tags/${N_M3U8DL_RE_TAG}"
           fi
-          asset=$(curl -fsSL "$url" | jq -r --arg p "${{ matrix.nm3u8_pattern }}" '.assets[]|select(.name|test($p))|.browser_download_url'|head -n1)
-          echo "asset_url=$asset" >> "$GITHUB_OUTPUT"
+          release_json=$(curl -fsSL "$release_url")
+          asset_url=$(echo "$release_json" | jq -r --arg pattern "${{ matrix.nm3u8_pattern }}" '.assets[] | select(.name | test($pattern)) | .browser_download_url' | head -n 1)
+          if [ -z "$asset_url" ] || [ "$asset_url" = "null" ]; then
+            echo "No matching N_m3u8DL-RE asset found for pattern: ${{ matrix.nm3u8_pattern }}"
+            exit 1
+          fi
+          echo "asset_url=$asset_url" >> "$GITHUB_OUTPUT"
 
-      # ===================== Linux 打包（扁平化目录）=====================
-      - name: Package Linux (flat dir)
-        if: matrix.os == 'linux'
+      - name: Package bundle (Linux/macOS)
+        if: matrix.os != 'windows'
         run: |
-          mkdir -p pkg
-          cp license.py udrm_remux pkg/
-          ldd udrm_remux | awk '/=> \// && $1~/(libavformat|libavcodec|libavutil|libswresample|libswscale)/{print $3}' | sort -u | xargs -r cp -t pkg/
-          curl -fsSL "${{ steps.resolve_asset.outputs.asset_url }}" | tar -xzf - --strip-components=1 -C pkg/
-          tar -C pkg -czf "cctv-decrypt-${{ matrix.target }}.tar.gz" .
+          bundle_dir="bundle-${{ matrix.target }}"
+          mkdir -p "$bundle_dir/lib" "$bundle_dir/tools"
+          cp license.py "$bundle_dir/"
+          cp udrm_remux "$bundle_dir/"
 
-      # ===================== macOS 打包（扁平化 + 修复动态库路径）=====================
-      - name: Package macOS (flat dir + fix rpath)
-        if: matrix.os == 'macos'
-        run: |
-          mkdir -p pkg
-          cp license.py udrm_remux pkg/
-          otool -L udrm_remux | awk '/(libavformat|libavcodec|libavutil|libswresample|libswscale).*dylib/{print $1}' | sort -u | xargs -I{} cp -fv {} pkg/
-          install_name_tool -add_rpath @executable_path pkg/udrm_remux
-          for dylib in pkg/*.dylib; do
-            install_name_tool -id @rpath/$(basename $dylib) $dylib
-            install_name_tool -change $dylib @rpath/$(basename $dylib) pkg/udrm_remux
-          done
-          curl -fsSL "${{ steps.resolve_asset.outputs.asset_url }}" | tar -xzf - --strip-components=1 -C pkg/
-          tar -C pkg -czf "cctv-decrypt-${{ matrix.target }}.tar.gz" .
+          if [ "${{ matrix.os }}" = "linux" ]; then
+            ldd udrm_remux | awk '/=> \// && ($1 ~ /(libavformat|libavcodec|libavutil|libswresample|libswscale|libpostproc)/) {print $3}' | sort -u | xargs -r -I{} cp -Lv "{}" "$bundle_dir/lib/"
+          else
+            otool -L udrm_remux | awk '/(libavformat|libavcodec|libavutil|libswresample|libswscale|libpostproc).*dylib/ {print $1}' | sort -u | xargs -I{} cp -Lv "{}" "$bundle_dir/lib/"
+          fi
 
-      # ===================== Windows 打包（扁平化 + 完整复制 DLL）=====================
-      - name: Package Windows (flat dir + full dlls)
+          curl -fsSL "${{ steps.resolve_asset_unix.outputs.asset_url }}" -o nm3u8dl.${{ matrix.archive_ext }}
+          mkdir -p "$bundle_dir/tools/N_m3u8DL-RE"
+          tar -xzf nm3u8dl.${{ matrix.archive_ext }} -C "$bundle_dir/tools/N_m3u8DL-RE"
+
+          tar -czf "cctv-decrypt-${{ matrix.target }}.tar.gz" "$bundle_dir"
+
+      - name: Package bundle (Windows)
         if: matrix.os == 'windows'
         shell: msys2 {0}
         run: |
-          mkdir -p pkg
-          cp license.py udrm_remux.exe pkg/
-          cp -fv "${{ matrix.tool_root }}"/bin/*.dll pkg/
-          curl -fsSL "${{ steps.resolve_asset_win.outputs.asset_url }}" -o nm.zip
-          unzip -q -j nm.zip -d pkg/
-          zip -rj "cctv-decrypt-${{ matrix.target }}.zip" pkg/
+          bundle_dir="bundle-${{ matrix.target }}"
+          mkdir -p "$bundle_dir/lib" "$bundle_dir/tools"
+          cp license.py "$bundle_dir/"
+          cp udrm_remux.exe "$bundle_dir/"
 
-      - name: Upload artifact
+          cp -Lv "${{ matrix.tool_root }}/bin"/libavcodec*.dll "$bundle_dir/lib/" || true
+          cp -Lv "${{ matrix.tool_root }}/bin"/libavformat*.dll "$bundle_dir/lib/" || true
+          cp -Lv "${{ matrix.tool_root }}/bin"/libavutil*.dll "$bundle_dir/lib/" || true
+          cp -Lv "${{ matrix.tool_root }}/bin"/libswresample*.dll "$bundle_dir/lib/" || true
+          cp -Lv "${{ matrix.tool_root }}/bin"/libswscale*.dll "$bundle_dir/lib/" || true
+
+          curl -fsSL "${{ steps.resolve_asset_win.outputs.asset_url }}" -o nm3u8dl.zip
+          mkdir -p "$bundle_dir/tools/N_m3u8DL-RE"
+          unzip -q nm3u8dl.zip -d "$bundle_dir/tools/N_m3u8DL-RE"
+
+          zip -r "cctv-decrypt-${{ matrix.target }}.zip" "$bundle_dir"
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: cctv-decrypt-${{ matrix.target }}
@@ -179,11 +198,11 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Publish Release
+    name: Publish GitHub Release assets
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - name: Get tag
+      - name: Resolve release tag
         id: tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -191,13 +210,17 @@ jobs:
           else
             echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/download-artifact@v4
+
+      - name: Download all package artifacts
+        uses: actions/download-artifact@v4
         with:
-          path: artifacts
-      - uses: softprops/action-gh-release@v2
+          path: release-artifacts
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.value }}
           files: |
-            artifacts/**/*.tar.gz
-            artifacts/**/*.zip
+            release-artifacts/**/*.tar.gz
+            release-artifacts/**/*.zip
           make_latest: true
