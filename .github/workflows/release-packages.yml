@@ -72,7 +72,7 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang pkg-config libavformat-dev libavcodec-dev libavutil-dev jq patchelf
+          sudo apt-get install -y clang pkg-config libavformat-dev libavcodec-dev libavutil-dev jq
       - name: Install macOS dependencies
         if: matrix.os == 'macos'
         run: brew install ffmpeg pkg-config jq
@@ -91,13 +91,25 @@ jobs:
             unzip
             zip
             curl
-      - name: Build udrm_remux (Linux/macOS)
-        if: matrix.os != 'windows'
-        run: make clean && make
       - name: Build udrm_remux (Windows)
         if: matrix.os == 'windows'
         shell: msys2 {0}
-        run: make clean && make
+        run: |
+          make clean && make \
+            CFLAGS="-O2 -Wall -Wextra $(pkg-config --cflags libavformat libavcodec libavutil)" \
+            LDLIBS="-static -static-libgcc $(pkg-config --static --libs libavformat libavcodec libavutil)"
+      - name: Build udrm_remux (Linux static)
+        if: matrix.os == 'linux'
+        run: |
+          make clean && make \
+            CFLAGS="-O2 -Wall -Wextra $(pkg-config --cflags libavformat libavcodec libavutil)" \
+            LDLIBS="-static $(pkg-config --static --libs libavformat libavcodec libavutil)"
+      - name: Build udrm_remux (macOS static)
+        if: matrix.os == 'macos'
+        run: |
+          make clean && make \
+            CFLAGS="-O2 -Wall -Wextra $(pkg-config --cflags libavformat libavcodec libavutil)" \
+            LDLIBS="$(pkg-config --static --libs libavformat libavcodec libavutil)"
       - name: Resolve N_m3u8DL-RE asset URL (Linux/macOS)
         if: matrix.os != 'windows'
         id: resolve_asset_unix
@@ -138,34 +150,6 @@ jobs:
           mkdir -p "$bundle_dir"
           cp license.py "$bundle_dir/"
           cp udrm_remux "$bundle_dir/"
-          if [ "${{ matrix.os }}" = "linux" ]; then
-            ffmpeg_lib_dir="$(pkg-config --variable=libdir libavcodec)"
-            cp -Lv "$ffmpeg_lib_dir"/libav*.so* "$bundle_dir/" || true
-            cp -Lv "$ffmpeg_lib_dir"/libsw*.so* "$bundle_dir/" || true
-            cp -Lv "$ffmpeg_lib_dir"/libpostproc*.so* "$bundle_dir/" || true
-            patchelf --set-rpath '$ORIGIN' "$bundle_dir/udrm_remux"
-          else
-            ffmpeg_lib_dir="$(brew --prefix ffmpeg)/lib"
-            cp -Lv "$ffmpeg_lib_dir"/libav*.dylib "$bundle_dir/" || true
-            cp -Lv "$ffmpeg_lib_dir"/libsw*.dylib "$bundle_dir/" || true
-            cp -Lv "$ffmpeg_lib_dir"/libpostproc*.dylib "$bundle_dir/" || true
-            for dylib in "$bundle_dir"/libav*.dylib "$bundle_dir"/libsw*.dylib "$bundle_dir"/libpostproc*.dylib; do
-              [ -e "$dylib" ] || continue
-              install_name_tool -id "@rpath/$(basename "$dylib")" "$dylib" || true
-            done
-            for target in "$bundle_dir/udrm_remux" "$bundle_dir"/libav*.dylib "$bundle_dir"/libsw*.dylib "$bundle_dir"/libpostproc*.dylib; do
-              [ -e "$target" ] || continue
-              otool -L "$target" | awk '/(libavformat|libavcodec|libavutil|libswresample|libswscale|libpostproc).*dylib/ {print $1}' | while read -r dep; do
-                [ -n "$dep" ] || continue
-                if [ "$target" = "$bundle_dir/udrm_remux" ]; then
-                  new_path="@executable_path/$(basename "$dep")"
-                else
-                  new_path="@loader_path/$(basename "$dep")"
-                fi
-                install_name_tool -change "$dep" "$new_path" "$target" || true
-              done
-            done
-          fi
           curl -fsSL "${{ steps.resolve_asset_unix.outputs.asset_url }}" -o nm3u8dl.${{ matrix.archive_ext }}
           tmp_extract="$(mktemp -d)"
           tar -xzf nm3u8dl.${{ matrix.archive_ext }} -C "$tmp_extract"
@@ -185,9 +169,6 @@ jobs:
           mkdir -p "$bundle_dir"
           cp license.py "$bundle_dir/"
           cp udrm_remux.exe "$bundle_dir/"
-          cp -Lv "${{ matrix.tool_root }}/bin"/libav*.dll "$bundle_dir/" || true
-          cp -Lv "${{ matrix.tool_root }}/bin"/libsw*.dll "$bundle_dir/" || true
-          cp -Lv "${{ matrix.tool_root }}/bin"/libpostproc*.dll "$bundle_dir/" || true
           curl -fsSL "${{ steps.resolve_asset_win.outputs.asset_url }}" -o nm3u8dl.zip
           tmp_extract="$(mktemp -d)"
           unzip -q nm3u8dl.zip -d "$tmp_extract"
