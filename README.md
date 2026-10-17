@@ -197,33 +197,6 @@ python3 license.py "这里填入上一步拿到的kid"
 output.mp4
 ```
 
----
-
-## 可选：环境变量注入密钥
-
-如果不想通过命令行传入密钥，可以使用环境变量 `UDRM_KEYS`。
-
-### Linux / macOS
-
-```bash
-export UDRM_KEYS="KID:CEK"
-./udrm_remux temp.mp4 output.mp4
-```
-
----
-
-## 命令行参数
-
-```text
-udrm_remux [OPTIONS] INPUT_FILE OUTPUT.mp4
-```
-
-| 参数 | 说明 |
-| --- | --- |
-| `--key <hex-cek>` | 指定解密 CEK |
-| `-h, --help` | 打印帮助信息 |
-
----
 
 ## 常见问题
 
