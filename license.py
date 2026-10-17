@@ -177,6 +177,10 @@ def fetch_cek(url: str = DEFAULT_URL, kid: str | None = None,
     cek = out["cek"]
     return out
 if __name__ == '__main__':
-    kid ="o0gfroc3000000000000000000000012"
-    out=fetch_cek(kid=kid)
-    print(out)
+    if len(os.sys.argv) < 2:
+        print("Usage: python license.py <KID>")
+        exit(1)
+    kid = os.sys.argv[1]
+    out = fetch_cek(kid=kid)
+    print("KID:", out["kid"])
+    print("CEK", out["cek"])
